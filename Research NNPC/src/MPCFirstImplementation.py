@@ -133,25 +133,6 @@ plt.title('Discrete-time Derivative of Control Input (u_dot)')
 plt.tight_layout()
 plt.show()
 
-import numpy as np
-import matplotlib.pyplot as plt
-import casadi as ca
-import scipy.signal
-
-# State-space representation (as given)
-A = np.array([[-1.2822, 0, 0.98, 0],
-              [0, 0, 1, 0],
-              [-5.4293, 0, -1.8366, 0],
-              [-128.2, 128.2, 0, 0]])
-B = np.array([[-0.3], [0], [-17], [0]])
-C = np.array([[0, 1, 0, 0], [0, 0, 1, 0]])
-D = np.array([[0], [0]])
-
-# Discretize the dynamics
-sampling_time = 0.25
-discrete_sys_open_loop = scipy.signal.cont2discrete((A, B, C, D), sampling_time)
-A_d, B_d, C_d, D_d, dt = discrete_sys_open_loop
-
 # MPC parameters
 N = 10  # Horizon length
 nx = A_d.shape[0]  # Number of states
