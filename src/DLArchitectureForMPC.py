@@ -426,12 +426,12 @@ for k in range(nsim_test):
 
 # Plot and compare the trajectories
 plt.figure(figsize=(12, 6))
-plt.plot(xcl[1, :], label='MPC State x1')
-plt.plot(x_nn[1, :], label='NN-only State x1')
-plt.plot(xcl[1, :], label='MPC State x1')
-plt.plot(x_nn[2, :], label='NN-only State x1')
-plt.plot(xcl[1, :], label='MPC State x1')
-plt.plot(x_nn[3, :], label='NN-only State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[1, :], label='MPC State x1')
+plt.plot(np.arange(nsim_test + 1) * dt,x_nn[1, :], label='NN-only State x1')
+plt.plot(np.arange(nsim_test + 1) * dt,xcl[1, :], label='MPC State x1')
+plt.plot(np.arange(nsim_test + 1) * dt,x_nn[2, :], label='NN-only State x1')
+plt.plot(np.arange(nsim_test + 1) * dt,xcl[1, :], label='MPC State x1')
+plt.plot(np.arange(nsim_test + 1) * dt,x_nn[3, :], label='NN-only State x1')
 plt.title('State x1 Trajectory Comparison')
 plt.xlabel('Time Steps')
 plt.ylabel('State x1')
