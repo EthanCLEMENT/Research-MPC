@@ -4,7 +4,6 @@ import mpctools as mpc
 import mpctools.plots as mpcplots
 import matplotlib.pyplot as plt
 
-
 # Define continuous time model.
 Acont = np.array([[-1.2822, 0, 0.98, 0],
               [0, 0, 1, 0],
@@ -19,7 +18,7 @@ m = Bcont.shape[1] # Number of control elements
 
 # Discretize.
 dt = .25
-Nt = 10
+Nt = 10 # Pas de temps
 (A, B) = mpc.util.c2d(Acont,Bcont,dt)
 
 def ffunc(x,u):
@@ -42,7 +41,7 @@ lb = dict(u=[umin], du=[dumin], x=x_min)
 ub = dict(u=[umax], du=[dumax], x=x_max)
 
 # Define Q and R matrices.
-Q = np.diag([1, 1, 1, 1])
+Q = np.diag([1, 10, 1, 1])
 R = np.array([[100]])
 
 def lfunc(x,u):
@@ -82,13 +81,6 @@ x2cl[nsim] = x0[1]
 umax_degrees = np.degrees(umax)
 umin_degrees = np.degrees(umin)
 ucl_degrees = np.degrees(ucl)
-
-# Plot things. Since time is along the second dimension, we must specify
-# timefirst = False.
-fig = mpc.plots.mpcplot(xcl,ucl_degrees,t,np.zeros(xcl.shape),xinds=[0],
-                        timefirst=False)
-mpcplots.showandsave(fig, "mpcexampleclosedloop.pdf")
-
 plt.figure(figsize=(10, 6))
 plt.plot(t, x2cl, label='x2 (second state variable)')
 plt.xlabel('Time [s]')
