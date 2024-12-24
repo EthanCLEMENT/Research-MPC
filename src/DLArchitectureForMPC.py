@@ -1,4 +1,3 @@
-# MPC for a multivariable system.
 import numpy as np
 import mpctools as mpc
 import mpctools.plots as mpcplots
@@ -9,6 +8,7 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
+import control as ctrl
 
 # Define continuous time model.
 Acont = np.array([[-1.2822, 0, 0.98, 0],
@@ -60,7 +60,7 @@ l = mpc.getCasadiFunc(lfunc, [n,m], ["x","u"], "l")
 x0 = np.array([0,0, 0, 100])
 N = {"x" : n, "u" : m, "t" : Nt}
 
-# Now simulate.
+# Solve MPC
 solver = mpc.nmpc(f, l, N, x0, lb, ub,verbosity=0, isQP=True)
 nsim = 40
 t = np.arange(nsim + 1) * dt
@@ -84,36 +84,12 @@ for k in range(nsim):
 xcl[:, nsim] = x0
 x2cl[nsim] = x0[1]
 
-umax_degrees = np.degrees(umax)
-umin_degrees = np.degrees(umin)
-ucl_degrees = np.degrees(ucl)
-plt.figure(figsize=(10, 6))
-plt.plot(t, x2cl, label='x2 (second state variable)')
-plt.xlabel('Time [s]')
-plt.ylabel('x2')
-plt.title('Evolution of x2 over Time')
-plt.legend()
-plt.grid()
-plt.show()
-
-# Plotting ucl (control input) as steps
-plt.figure(figsize=(10, 6))
-plt.step(t[:-1], ucl_degrees.flatten(), where='post', label='Control Input (u)')  # Using step plot
-plt.axhline(umax_degrees, color='r', linestyle='--', label='u max')
-plt.axhline(umin_degrees, color='r', linestyle='--', label='u min')
-plt.xlabel('Time [s]')
-plt.ylabel('Control Input')
-plt.title('Evolution of Control Input (u) over Time')
-plt.legend()
-plt.grid()
-plt.show()
-
 # Convert x2 from radians to degrees
 x2_degrees = np.degrees(xcl[1, :])
 x2max_degrees = np.degrees(x2max)
 x2min_degrees = np.degrees(x2min)
 
-# Plotting x2 (in degrees) and x4 on the same plot
+# Plotting x2 (in degrees) and x4 
 plt.figure(figsize=(10, 6))
 plt.plot(t, x2_degrees, label='x2 (second state variable in degrees)')
 plt.plot(t, xcl[3, :], label='x4 (fourth state variable)')
@@ -126,11 +102,27 @@ plt.legend()
 plt.grid()
 plt.show()
 
+umax_degrees = np.degrees(umax)
+umin_degrees = np.degrees(umin)
+ucl_degrees = np.degrees(ucl)
+
+# Plotting ucl
+plt.figure(figsize=(10, 6))
+plt.step(t[:-1], ucl_degrees.flatten(), where='post', label='Control Input (u)')  
+plt.axhline(umax_degrees, color='r', linestyle='--', label='u max')
+plt.axhline(umin_degrees, color='r', linestyle='--', label='u min')
+plt.xlabel('Time [s]')
+plt.ylabel('Control Input')
+plt.title('Evolution of Control Input (u) over Time')
+plt.legend()
+plt.grid()
+plt.show()
+
 ducl_degrees = np.degrees(ducl)
 dumax_degrees = np.degrees(dumax)
 dumin_degrees = np.degrees(dumin)
 
-# Plotting ducl (control input) as steps
+# Plotting ducl 
 plt.figure(figsize=(10, 6))
 plt.step(t[:-1], ducl_degrees.flatten(), where='post', label='Ducl')  
 plt.axhline(dumax_degrees, color='r', linestyle='--', label='dumax')
@@ -146,7 +138,7 @@ plt.show()
 num_simulations = 1000  
 
 # Define ranges for initial conditions x1, x2, x3, x4
-x1_range = [-0.0873, 0.2618]
+x1_range = [-0.2618, 0.2618]
 x2_range = [-0.349, 0.349]  
 x3_range = [-0.5, 0.5]
 x4_range = [100, 100]
@@ -159,12 +151,6 @@ x0_samples[:, 1] = np.random.uniform(x2_range[0], x2_range[1], num_simulations)
 x0_samples[:, 2] = np.random.uniform(x3_range[0], x3_range[1], num_simulations)
 x0_samples[:, 3] = np.random.uniform(x4_range[0], x4_range[1], num_simulations)
 
-# Simulation parameters
-nsim = 40  
-dt = .25
-Nt = 10
-t = np.arange(nsim + 1) * dt
-
 # Initialize lists to store data
 X_data = []  # State trajectories
 U_data = []  # Control inputs
@@ -174,33 +160,47 @@ for idx in range(num_simulations):
     xcl = np.zeros((n, nsim + 1))
     xcl[:, 0] = x0
     ucl = np.zeros((m, nsim))
+    ducl = np.zeros((m, nsim))
     solver = mpc.nmpc(f, l, N, x0, lb, ub, verbosity=0, isQP=True)
-    
+
+    success = True  
+
     for k in range(nsim):
         solver.fixvar("x", 0, x0)
         try:
             sol = mpc.callSolver(solver)
-            print("enum {k} : ", sol)
-            X_data.append(xcl[:, :nsim])  
-            U_data.append(ucl)
+            print(f"Simulation {idx}, Time step {k}, Status: {sol['status']}")
+            ucl[:, k] = sol["u"][0, :]
+            if k > 0:
+                ducl[:, k] = ucl[:, k] - ucl[:, k - 1]
+            else:
+                ducl[:, k] = ucl[:, k] - 0
+            x0 = ffunc(x0, ucl[:, k])
+            xcl[:, k + 1] = x0
         except Exception as e:
-            continue
+            print(f"Simulation {idx}, Time step {k}, Exception: {e}")
+            print("lmao")
+            success = False
+
+    if success:
+        X_data.append(xcl[:, :nsim])
+        U_data.append(ucl)
         
-        ucl[:, k] = sol["u"][0, :]
-        x0 = ffunc(x0, ucl[:, k])
-        xcl[:, k + 1] = x0
+X_data = np.array(X_data)
+U_data = np.array(U_data)
 
-X_data = np.array(X_data)  # Shape: (num_successful_simulations, n, nsim)
-U_data = np.array(U_data)  # Shape: (num_successful_simulations, m, nsim)
+x = X_data[:, 1]  
+y = U_data[:,0]
 
-
-# Transpose the data to have time steps in the first dimension
-X_data = np.transpose(X_data, (0, 2, 1))  # Shape: (num_simulations, nsim, n)
-U_data = np.transpose(U_data, (0, 2, 1))  # Shape: (num_simulations, nsim, m)
+plt.scatter(x,y)
+plt.show()
 
 # Initialize lists for inputs and outputs
 inputs = []
 outputs = []
+
+X_data = np.transpose(X_data, (0, 2, 1))  
+U_data = np.transpose(U_data, (0, 2, 1))  
 
 for i in range(num_simulations):
     for t in range(nsim):
@@ -209,9 +209,25 @@ for i in range(num_simulations):
         inputs.append(x_t)
         outputs.append(u_t)
 
+class FeedforwardNN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(FeedforwardNN, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.relu2 = nn.ReLU()
+        self.fc3 = nn.Linear(hidden_size, output_size)
+    def forward(self, x):
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        out = self.relu2(out)
+        out = self.fc3(out)
+        return out
+
 # Convert to arrays
-inputs = np.array(inputs)  # Shape: (num_simulations * nsim, n)
-outputs = np.array(outputs)  # Shape: (num_simulations * nsim, m)
+inputs = np.array(inputs)  
+outputs = np.array(outputs)  
 
 # Split the data
 X_train, X_test, y_train, y_test = train_test_split(inputs, outputs, test_size=0.2, random_state=42)
@@ -240,22 +256,6 @@ batch_size = 64
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-class FeedforwardNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(FeedforwardNN, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.relu2 = nn.ReLU()
-        self.fc3 = nn.Linear(hidden_size, output_size)
-    def forward(self, x):
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.fc2(out)
-        out = self.relu2(out)
-        out = self.fc3(out)
-        return out
-    
 # Define sequence length
 seq_length = 5
 
@@ -293,11 +293,10 @@ class LSTMModel(nn.Module):
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, output_size)
     def forward(self, x):
-        # Initialize hidden and cell states
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)
-        out, _ = self.lstm(x, (h0, c0))  # out: (batch_size, seq_length, hidden_size)
-        out = self.fc(out[:, -1, :])      # Take the output from the last time step
+        out, _ = self.lstm(x, (h0, c0))  
+        out = self.fc(out[:, -1, :])     
         return out
 
 class LSTMSNN(nn.Module):
@@ -321,7 +320,7 @@ class LSTMSNN(nn.Module):
 # Set input and output sizes
 input_size = X_train_scaled.shape[1]
 output_size = y_train_scaled.shape[1]
-hidden_size = 64
+hidden_size = 100
 
 # Instantiate models
 model_NN = FeedforwardNN(input_size, hidden_size, output_size)
@@ -334,7 +333,7 @@ optimizer_NN = optim.Adam(model_NN.parameters(), lr=0.001)
 optimizer_LSTM = optim.Adam(model_LSTM.parameters(), lr=0.001)
 optimizer_LSTMSNN = optim.Adam(model_LSTMSNN.parameters(), lr=0.001)
 
-def train_model(model, optimizer, train_loader, num_epochs=20):
+def train_model(model, optimizer, train_loader, num_epochs=100):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
@@ -367,7 +366,6 @@ def evaluate_model(model, test_loader):
             outputs = model(inputs)
             predictions.extend(outputs.numpy())
             actuals.extend(targets.numpy())
-    # Inverse transform to original scale
     predictions = scaler_y.inverse_transform(np.array(predictions))
     actuals = scaler_y.inverse_transform(np.array(actuals))
     mse = np.mean((predictions - actuals) ** 2)
@@ -400,50 +398,134 @@ def simulate_controller(model, x0, nsim):
         x[:, k + 1] = x_next
     return x, u
 
-# Choose a random initial condition from the test set
+def simulate_controllerLSTM(model, x0, nsim):
+    x = np.zeros((n, nsim + 1))
+    x[:, 0] = x0
+    u = np.zeros((m, nsim))
+    for k in range(nsim):
+        # Prepare input
+        x_input = x[:, k].reshape(1, -1)
+        x_input_scaled = scaler_X.transform(x_input)
+        x_input_tensor = torch.tensor(x_input_scaled, dtype=torch.float32).unsqueeze(1) 
+        # Predict control action
+        with torch.no_grad():
+            u_pred = model(x_input_tensor).numpy()
+        u_unscaled = scaler_y.inverse_transform(u_pred)
+        u[:, k] = u_unscaled
+        # Apply control action
+        x_next = ffunc(x[:, k], u[:, k])
+        x[:, k + 1] = x_next
+    return x, u
+
 x0_test = np.array([0,0, 0, 100])
 nsim_test = 40
 
-# Simulate NN-only controller
+# Simulate controllers
 x_nn, u_nn = simulate_controller(model_NN, x0_test, nsim_test)
+x_lstm, u_lstm = simulate_controllerLSTM(model_LSTM,x0_test,nsim_test)
+x_lstmsnn, u_lstmsnn = simulate_controllerLSTM(model_LSTMSNN,x0_test,nsim_test)
 
-# Simulate MPC controller for comparison
-x_mpc = np.zeros((n, nsim_test + 1))
-x_mpc[:, 0] = x0_test
-u_mpc = np.zeros((m, nsim_test))
-solver = mpc.nmpc(f, l, N, x0_test, lb, ub, verbosity=0, isQP=True)
-
-for k in range(nsim_test):
-    solver.fixvar("x", 0, x0_test)
-    sol = mpc.callSolver(solver)
-    if sol["status"] != "Solve_Succeeded":
-        print(f"Iteration {k}: Solver failed with status {sol['status']}")
-        break
-    u_mpc[:, k] = sol["u"][0, :]
-    x_next = ffunc(x0_test, u_mpc[:, k])
-    x_mpc[:, k + 1] = x_next
-    x0_test = x_next
-
-# Plot and compare the trajectories
 plt.figure(figsize=(12, 6))
-plt.plot(np.arange(nsim_test + 1) * dt, xcl[1, :], label='MPC State x1')
-plt.plot(np.arange(nsim_test + 1) * dt,x_nn[1, :], label='NN-only State x1')
-plt.plot(np.arange(nsim_test + 1) * dt,xcl[1, :], label='MPC State x1')
-plt.plot(np.arange(nsim_test + 1) * dt,x_nn[2, :], label='NN-only State x1')
-plt.plot(np.arange(nsim_test + 1) * dt,xcl[1, :], label='MPC State x1')
-plt.plot(np.arange(nsim_test + 1) * dt,x_nn[3, :], label='NN-only State x1')
-plt.title('State x1 Trajectory Comparison')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[0, :]), label='MPC State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_nn[0, :]), label='NN-only State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[1, :]), label='MPC State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_nn[1, :]), label='NN-only State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[2, :], label='MPC State x3')
+plt.plot(np.arange(nsim_test + 1) * dt, x_nn[2, :], label='NN-only State x3')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[3, :], label='MPC State x4')
+plt.plot(np.arange(nsim_test + 1) * dt, x_nn[3, :], label='NN-only State x4')
+plt.title('State comparisons')
 plt.xlabel('Time Steps')
 plt.ylabel('State x1')
 plt.legend()
 plt.show()
 
-# Similarly, plot control inputs
 plt.figure(figsize=(12, 6))
-plt.step(range(nsim_test), u_mpc[0, :], where='post', label='MPC Control Input')
-plt.step(range(nsim_test), u_nn[0, :], where='post', label='NN-only Control Input')
+plt.step(np.arange(nsim_test) * dt , ucl[0, :], where='post', label='MPC Control Input')
+plt.step(np.arange(nsim_test) * dt , u_nn[0, :], where='post', label='NN-only Control Input')
 plt.title('Control Input Comparison')
 plt.xlabel('Time Steps')
 plt.ylabel('Control Input')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.step(np.arange(nsim_test) * dt , np.degrees(ucl[0, :]), where='post', label='MPC Control Input')
+plt.step(np.arange(nsim_test) * dt , np.degrees(u_nn[0, :]), where='post', label='NN-only Control Input')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[1, :]), label='MPC State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_nn[1, :]), label='NN-only State x2')
+plt.title('x2 vs control input (MPC/NN)')
+plt.xlabel('x2 and u')
+plt.ylabel('Time steps')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[0, :]), label='MPC State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_lstm[0, :]), label='LSTM State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[1, :]), label='MPC State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_lstm[1, :]), label='LSTM State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[2, :], label='MPC State x3')
+plt.plot(np.arange(nsim_test + 1) * dt, x_lstm[2, :], label='LSTM State x3')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[3, :], label='MPC State x4')
+plt.plot(np.arange(nsim_test + 1) * dt, x_lstm[3, :], label='LSTM State x4')
+plt.title('State comparisons')
+plt.xlabel('Time Steps')
+plt.ylabel('State x1')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.step(np.arange(nsim_test) * dt , ucl[0, :], where='post', label='MPC Control Input')
+plt.step(np.arange(nsim_test) * dt , u_lstm[0, :], where='post', label='LSTM Control Input')
+plt.title('Control Input Comparison')
+plt.xlabel('Time Steps')
+plt.ylabel('Control Input')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.step(np.arange(nsim_test) * dt , np.degrees(ucl[0, :]), where='post', label='MPC Control Input')
+plt.step(np.arange(nsim_test) * dt , np.degrees(u_lstm[0, :]), where='post', label='LSTM Control Input')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[1, :]), label='MPC State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_lstm[1, :]), label='LSTM State x2')
+plt.title('x2 vs control input (MPC/LSTM)')
+plt.xlabel('x2 and u')
+plt.ylabel('Time steps')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[0, :]), label='MPC State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_lstmsnn[0, :]), label='LSTMSNN State x1')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[1, :]), label='MPC State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_lstmsnn[1, :]), label='LSTMSNN State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[2, :], label='MPC State x3')
+plt.plot(np.arange(nsim_test + 1) * dt, x_lstmsnn[2, :], label='LSTMSNN State x3')
+plt.plot(np.arange(nsim_test + 1) * dt, xcl[3, :], label='MPC State x4')
+plt.plot(np.arange(nsim_test + 1) * dt, x_lstmsnn[3, :], label='LSTMSNN State x4')
+plt.title('State comparisons')
+plt.xlabel('Time Steps')
+plt.ylabel('State x1')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.step(np.arange(nsim_test) * dt , ucl[0, :], where='post', label='MPC Control Input')
+plt.step(np.arange(nsim_test) * dt , u_lstmsnn[0, :], where='post', label='LSTMSNN Control Input')
+plt.title('Control Input Comparison')
+plt.xlabel('Time Steps')
+plt.ylabel('Control Input')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12, 6))
+plt.step(np.arange(nsim_test) * dt , np.degrees(ucl[0, :]), where='post', label='MPC Control Input')
+plt.step(np.arange(nsim_test) * dt , np.degrees(u_lstmsnn[0, :]), where='post', label='LSTMSNN Control Input')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(xcl[1, :]), label='MPC State x2')
+plt.plot(np.arange(nsim_test + 1) * dt, np.degrees(x_lstmsnn[1, :]), label='LSTMSNN State x2')
+plt.title('x2 vs control input (LSTMSNN)')
+plt.xlabel('x2 and u')
+plt.ylabel('Time steps')
 plt.legend()
 plt.show()

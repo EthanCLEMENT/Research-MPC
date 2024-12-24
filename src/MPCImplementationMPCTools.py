@@ -1,4 +1,3 @@
-# MPC for a multivariable system.
 import numpy as np
 import mpctools as mpc
 import mpctools.plots as mpcplots
@@ -18,11 +17,10 @@ m = Bcont.shape[1] # Number of control elements
 
 # Discretize.
 dt = .25
-Nt = 10 # Pas de temps
+Nt = 10
 (A, B) = mpc.util.c2d(Acont,Bcont,dt)
 
 def ffunc(x,u):
-    """Linear discrete-time model."""
     return mpc.mtimes(A, x) + mpc.mtimes(B, u)
 f = mpc.getCasadiFunc(ffunc, [n, m], ["x", "u"], "f")
 
@@ -45,7 +43,6 @@ Q = np.diag([1, 10, 1, 1])
 R = np.array([[100]])
 
 def lfunc(x,u):
-    """Quadratic stage cost."""
     return mpc.mtimes(x.T, Q, x) + mpc.mtimes(u.T, R, u)
 
 l = mpc.getCasadiFunc(lfunc, [n,m], ["x","u"], "l")
@@ -54,7 +51,7 @@ l = mpc.getCasadiFunc(lfunc, [n,m], ["x","u"], "l")
 x0 = np.array([0,0, 0, 100])
 N = {"x" : n, "u" : m, "t" : Nt}
 
-# Now simulate.
+# Simulate
 solver = mpc.nmpc(f, l, N, x0, lb, ub,verbosity=0, isQP=True)
 nsim = 40
 t = np.arange(nsim + 1) * dt
@@ -90,7 +87,7 @@ plt.legend()
 plt.grid()
 plt.show()
 
-# Plotting ucl (control input) as steps
+# Plotting ucl 
 plt.figure(figsize=(10, 6))
 plt.step(t[:-1], ucl_degrees.flatten(), where='post', label='Control Input (u)')  # Using step plot
 plt.axhline(umax_degrees, color='r', linestyle='--', label='u max')
@@ -108,7 +105,7 @@ x2max_degrees = np.degrees(x2max)
 x2min_degrees = np.degrees(x2min)
 
 
-# Plotting x2 (in degrees) and x4 on the same plot
+# Plotting x2 and x4 
 plt.figure(figsize=(10, 6))
 plt.plot(t, x2_degrees, label='x2 (second state variable in degrees)')
 plt.plot(t, xcl[3, :], label='x4 (fourth state variable)')
@@ -125,7 +122,7 @@ ducl_degrees = np.degrees(ducl)
 dumax_degrees = np.degrees(dumax)
 dumin_degrees = np.degrees(dumin)
 
-# Plotting ducl (control input) as steps
+# Plotting ducl
 plt.figure(figsize=(10, 6))
 plt.step(t[:-1], ducl_degrees.flatten(), where='post', label='Ducl')  # Using step plot
 plt.axhline(dumax_degrees, color='r', linestyle='--', label='dumax')
