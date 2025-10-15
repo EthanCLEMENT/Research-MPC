@@ -1,11 +1,28 @@
 import numpy as np
 from numpy import random
-from scipy.linalg import expm, solve, inv, cholesky
+from scipy.linalg import expm, inv, cholesky
 from scipy.signal import place_poles
 import matplotlib.pyplot as plt
 import time
 
-# --- System definition (continuous) ---
+def check_state_bounds(x, x_lb, x_ub, tol=1e-8):
+    violations = (x < x_lb - tol) | (x > x_ub + tol)
+    return not np.any(violations), violations
+
+def check_input_bounds(u, u_lb, u_ub, tol=1e-8):
+    violations = (u < u_lb - tol) | (u > u_ub + tol)
+    return not np.any(violations), violations
+
+def log_violations(trial, x, u, state_violations, input_violations, Delta, max_logs=5):
+    logs = []
+    for i, j in np.argwhere(state_violations)[:max_logs]:
+        logs.append(f"[Trial {trial}] State violation at t={i*Delta:.2f}s: "
+                    f"x_{j}={x[i,j]:.6f}")
+    for i, j in np.argwhere(input_violations)[:max_logs]:
+        logs.append(f"[Trial {trial}] Input violation at t={i*Delta:.2f}s: "
+                    f"u_{j}={u[i,j]:.6f}")
+    return logs
+
 Acont = np.array([
     [-0.026, 0.074, -0.804, -9.809, 0],
     [-0.242, -2.017, 73.297, -0.105, -0.001],
@@ -26,34 +43,27 @@ C = np.array([
     [0, 0, 0, 0, 1]
 ])
 
-# Sampling
 Delta = 0.1
 Nx, Nu, Ny = 5, 2, 3
 Nsim = 50
 t = np.arange(Nsim+1) * Delta
 
-# Discretize
 A = expm(Acont*Delta)
-# exact B discretization:
-
-from scipy.linalg import solve_continuous_lyapunov
-# simple zero‐order hold:
 B = np.linalg.solve(Acont, (A - np.eye(Nx))).dot(Bcont)
 
-# Noise covariances
 Q = 0.01 * np.eye(Nx)
 R = 0.1  * np.eye(Ny)
 
-# Observer gain L (A-CL)
+# Luenberger observer gain
 desired_poles = [0.6, 0.61, 0.62, 0.63, 0.64]
 L = place_poles(A.T, C.T, desired_poles).gain_matrix.T
 
-# Analytic MHE + pre-estimator
 class LinearMHEPreEstimator:
-    def __init__(self, A, B, C, Q, R, Pinv):
+    def __init__(self, A, B, C, Q, R, Pinv, x_lb, x_ub):
         self.A = A; self.B = B; self.C = C
         self.Qinv = inv(Q); self.Rinv = inv(R); self.Pinv = Pinv
         self.nx = A.shape[0]
+        self.lb = x_lb; self.ub = x_ub
 
     def estimate(self, x0bar, u_seq, y_seq):
         M = y_seq.shape[0] - 1
@@ -62,16 +72,17 @@ class LinearMHEPreEstimator:
         H = np.zeros((Nvar, Nvar))
         g = np.zeros(Nvar)
 
-        # Initial‐state prior
+        # Prior
         H[0:n,0:n] += self.Pinv
-        g[0:n]     += self.Pinv @ x0bar
+        g[0:n] += self.Pinv @ x0bar
 
-        # Measurement terms
+        # Measurement
         for k in range(M+1):
             i = k*n
             H[i:i+n, i:i+n] += self.C.T @ self.Rinv @ self.C
             g[i:i+n]       += self.C.T @ self.Rinv @ y_seq[k]
-        # Dynamics terms
+
+        # Dynamics
         for k in range(M):
             i = k*n; j = (k+1)*n
             H[i:i+n, i:i+n] += self.A.T @ self.Qinv @ self.A
@@ -81,128 +92,71 @@ class LinearMHEPreEstimator:
             bu = self.B @ u_seq[k]
             g[i:i+n] += -self.A.T @ self.Qinv @ bu
             g[j:j+n] +=  self.Qinv @ bu
-        # Solve
-        X = solve(H, g)
-        return X[-n:]
 
-# Precompute inverses
-Qinv = inv(Q)
-Rinv = inv(R)
-P0 = np.eye(Nx)     
-Pinv0 = inv(P0)
+        from qpsolvers import solve_qp
+        lb_all = np.tile(self.lb, M+1)
+        ub_all = np.tile(self.ub, M+1)
+        G = np.vstack([np.eye(Nvar), -np.eye(Nvar)])
+        h = np.hstack([ub_all, -lb_all])
+        H = 0.5 * (H + H.T)   
+        x = solve_qp(H.astype(np.float64), -g.astype(np.float64),
+                     G.astype(np.float64), h.astype(np.float64), solver="mosek")
+        if x is None:
+            raise ValueError("QP failed.")
+        return x[-n:]
 
-# Build estimator 
-horizon = 25
-mhe = LinearMHEPreEstimator(A, B, C, Q, R, Pinv0) 
+state_lb = np.array([7.0, -10.0, -1.0, -0.5, 0.0])
+state_ub = np.array([100.0, 10.0, 1.0, 0.5, 200.0])
+control_lb = np.array([-1.0, -1.0])
+control_ub = np.array([1.0, 1.0])
 
+Pinv0 = inv(np.eye(Nx))
+mhe = LinearMHEPreEstimator(A, B, C, Q, R, Pinv0, state_lb, state_ub)
+
+# Dataset for NN
 random.seed(927)
-x_true = np.zeros((Nsim+1, Nx))
-y_meas = np.zeros((Nsim+1, Ny))
-x_true[0] = np.zeros(Nx)
 omega = 2*np.pi/(Nsim*Delta)
-u = np.vstack([np.sin(omega*t), np.cos(omega*t)]).T[:-1]
-w = cholesky(Q, lower=True) @ random.randn(Nx, Nsim)
-v = cholesky(R, lower=True) @ random.randn(Ny, Nsim+1)
-for k in range(Nsim+1):
-    y_meas[k] = C @ x_true[k] + v[:,k]
-    if k<Nsim:
-        x_true[k+1] = A @ x_true[k] + B @ u[k] + w[:,k]
-
-xhat = np.zeros((Nsim+1, Nx))
-xhat[0] = np.zeros(Nx)
-x0bar = xhat[0].copy()
-P = P0.copy()
-
-times = []
-total_start_time = time.perf_counter()
-
-for k in range(Nsim):
-    t0 = time.perf_counter()
-
-    # Build window
-    M = min(max(k,1), horizon)
-    tmin = max(0, k-horizon)
-    tmax = k+1
-    u_win = u[tmin:tmax-1] if k>=1 else np.zeros((0, Nu))
-    y_win = y_meas[tmin:tmax]
-
-    # Pre‐estimator update (A-CL)
-    if k>0:
-        x0bar = A @ xhat[k] + B @ u[k-1] + L @ (y_meas[k] - C @ xhat[k])
-        P = (A - L@C)@P@(A - L@C).T + Q + L@R@L.T
-        mhe.Pinv = inv(P)
-
-    # MHE analytic solve
-    xhat[k+1] = mhe.estimate(x0bar, u_win, y_win)
-
-    times.append(time.perf_counter() - t0)
-total_end_time = time.perf_counter()
-
-# --- Results ---
-print(f"Avg. time per iter: {np.mean(times)*1e3:.6f} ms")
-print(f"Total time for {Nsim} iterations: {(total_end_time - total_start_time)*1e3:.6f} ms")
-
-# Plots
-fig, axs = plt.subplots(Nx,1, figsize=(8,Nx*2))
-for i in range(Nx):
-    axs[i].plot(t, x_true[:,i], label=f"True $x_{i}$")
-    axs[i].plot(t, xhat[:,i],'--', label=f"Est. $x_{i}$")
-    axs[i].legend(); axs[i].set_ylabel(f"$x_{i}$")
-axs[-1].set_xlabel("Time [s]")
-plt.suptitle("Analytic Linear MHE + A-CL")
-plt.tight_layout()
-plt.show() 
-
-
-# Monte Carlo dataset generation from MHE
-num_simulations = 1000
-horizon = 25
-seq_length = 1  # Only 1-step MHE output is used
-
-X_mhe_data = []
-Y_mhe_data = []
+num_simulations = 500
+X_data, Y_data = [], []
 
 for sim in range(num_simulations):
     x_sim = np.zeros((Nsim+1, Nx))
-    x_sim[0] = np.random.uniform(-1, 1, size=Nx)
     u_sim = np.vstack([np.sin(omega*t), np.cos(omega*t)]).T[:-1]
     y_sim = np.zeros((Nsim+1, Ny))
 
-    # Add noise
     w = cholesky(Q, lower=True) @ random.randn(Nx, Nsim)
     v = cholesky(R, lower=True) @ random.randn(Ny, Nsim+1)
 
     for k in range(Nsim):
-        x_sim[k+1] = A @ x_sim[k] + B @ u_sim[k] + w[:, k]
-        y_sim[k] = C @ x_sim[k] + v[:, k]
-    y_sim[Nsim] = C @ x_sim[Nsim] + v[:, Nsim]
+        x_sim[k+1] = A @ x_sim[k] + B @ u_sim[k] + w[:,k]
+        y_sim[k] = C @ x_sim[k] + v[:,k]
+    y_sim[Nsim] = C @ x_sim[Nsim] + v[:,Nsim]
 
     xhat_sim = np.zeros((Nsim+1, Nx))
-    x0bar = x_sim[0].copy()
+    xhat_sim[0] = np.array([20, 1, 0.1, 0.2, 100])
     P = np.eye(Nx)
-    
-    for k in range(Nsim):
-        tmin = max(0, k-horizon)
-        tmax = k+1
-        u_win = u_sim[tmin:tmax-1] if k >= 1 else np.zeros((0, Nu))
-        y_win = y_sim[tmin:tmax]
+    mhe.Pinv = inv(P)
+    x0bar = xhat_sim[0].copy()
 
-        if k > 0:
-            x0bar = A @ xhat_sim[k] + B @ u_sim[k-1] + L @ (y_sim[k] - C @ xhat_sim[k])
-            P = (A - L @ C) @ P @ (A - L @ C).T + Q + L @ R @ L.T
+
+    for k in range(Nsim):
+        tmin = max(0, k-25)
+        tmax = k+1
+        u_win = u_sim[tmin:tmax-1] if k>=1 else np.zeros((0, Nu))
+        y_win = y_sim[tmin:tmax]
+        if k>0:
+            x0bar = A @ xhat_sim[k] + B @ u_sim[k-1] + L@(y_sim[k]-C@xhat_sim[k])
+            P = (A-L@C)@P@(A-L@C).T + Q + L@R@L.T
             mhe.Pinv = inv(P)
-        
         xhat_sim[k+1] = mhe.estimate(x0bar, u_win, y_win)
 
-        # Save features and labels
-        X_mhe_data.append(np.hstack([xhat_sim[k], u_sim[k], y_sim[k+1]]))  # input
-        Y_mhe_data.append(xhat_sim[k+1])  # target
+        X_data.append(np.hstack([xhat_sim[k], u_sim[k], y_sim[k+1]]))
+        Y_data.append(np.hstack([xhat_sim[k+1], u_sim[k]]))
 
-X_mhe_data = np.array(X_mhe_data)
-Y_mhe_data = np.array(Y_mhe_data)
+X_data = np.array(X_data)
+Y_data = np.array(Y_data)
 
-print("MHE dataset shapes:", X_mhe_data.shape, Y_mhe_data.shape)
-# Data preprocessing
+# Train NN
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
@@ -210,94 +164,187 @@ from torch.utils.data import TensorDataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
 
-# Train/test split
-X_train, X_test, y_train, y_test = train_test_split(X_mhe_data, Y_mhe_data, test_size=0.2, random_state=42)
-
-# Normalize
+X_train, X_test, y_train, y_test = train_test_split(X_data, Y_data, test_size=0.2, random_state=42)
 scaler_X = StandardScaler()
-scaler_y = StandardScaler()
-
 X_train_scaled = scaler_X.fit_transform(X_train)
 X_test_scaled = scaler_X.transform(X_test)
-y_train_scaled = scaler_y.fit_transform(y_train)
-y_test_scaled = scaler_y.transform(y_test)
 
-# Convert to tensors
 X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train_scaled, dtype=torch.float32)
-X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
-y_test_tensor = torch.tensor(y_test_scaled, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+train_loader = DataLoader(TensorDataset(X_train_tensor, y_train_tensor), batch_size=64, shuffle=True)
 
-train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=64)
-
-# Define NN
-class MHE_Net(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+class MHE_Net_XU(nn.Module):
+    def __init__(self, in_dim, h, nx, nu, x_lb, x_ub, u_lb, u_ub):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
-        )
-    def forward(self, x):
-        return self.net(x)
+        self.x_lb = nn.Parameter(torch.tensor(x_lb, dtype=torch.float32), requires_grad=False)
+        self.x_ub = nn.Parameter(torch.tensor(x_ub, dtype=torch.float32), requires_grad=False)
+        self.u_lb = nn.Parameter(torch.tensor(u_lb, dtype=torch.float32), requires_grad=False)
+        self.u_ub = nn.Parameter(torch.tensor(u_ub, dtype=torch.float32), requires_grad=False)
+        self.backbone = nn.Sequential(nn.Linear(in_dim,h),nn.ReLU(),nn.Linear(h,h),nn.ReLU())
+        self.head_x = nn.Linear(h, nx)
+        self.head_u = nn.Linear(h, nu)
+    def forward(self,z):
+        h = self.backbone(z)
+        rx = torch.tanh(self.head_x(h))
+        x = 0.5*(rx+1)*(self.x_ub-self.x_lb)+self.x_lb
+        ru = self.head_u(h)
+        u = (self.u_ub-self.u_lb)/torch.pi*torch.atan(ru)+0.5*(self.u_ub+self.u_lb)
+        return torch.cat([x,u],dim=1)
 
-model = MHE_Net(X_train.shape[1], 64, Nx)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-criterion = nn.MSELoss()
+model = MHE_Net_XU(X_train.shape[1],64,Nx,Nu,state_lb,state_ub,control_lb,control_ub)
+opt = optim.Adam(model.parameters(),lr=1e-3)
+loss_fn = nn.MSELoss()
 
-# Training loop
-def train_model(model, loader, optimizer, criterion, epochs=100):
-    model.train()
-    for epoch in range(epochs):
-        epoch_loss = 0
-        for xb, yb in loader:
-            optimizer.zero_grad()
-            pred = model(xb)
-            loss = criterion(pred, yb)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}, Loss: {epoch_loss/len(loader):.4f}")
+for epoch in range(100):
+    model.train(); tot=0
+    for xb,yb in train_loader:
+        opt.zero_grad()
+        pred=model(xb)
+        loss=loss_fn(pred,yb)
+        loss.backward(); opt.step()
+        tot+=loss.item()
+    if (epoch+1)%10==0:
+        print(f"Epoch {epoch+1}, Loss {tot/len(train_loader):.4f}")
 
-train_model(model, train_loader, optimizer, criterion)
+# Monte Carlo evaluation
+def compute_rmse(xhat,xtrue):
+    return np.sqrt(np.mean(np.sum((xhat-xtrue)**2,axis=1)))
 
-# Run estimation using NN
-xhat_nn = np.zeros((Nsim+1, Nx))
-xhat_nn[0] = np.zeros(Nx)
-start_time_nn = time.perf_counter()
+N_mc=100
+rng=np.random.default_rng(0)
+results={"MHE":{"rmse":[], "state_ok":[], "input_ok":[], "times":[]},
+         "NN":{"rmse":[], "state_ok":[], "input_ok":[], "times":[]}}
 
-for k in range(Nsim):
-    
-    x_input = np.hstack([xhat_nn[k], u[k], y_meas[k+1]])
-    x_input_scaled = scaler_X.transform(x_input.reshape(1, -1))
-    x_input_tensor = torch.tensor(x_input_scaled, dtype=torch.float32)
+model.eval()
 
-    with torch.no_grad():
-        x_next_scaled = model(x_input_tensor).numpy()
-    x_next = scaler_y.inverse_transform(x_next_scaled)
-    xhat_nn[k+1] = x_next   
-end_time_nn = time.perf_counter()
-avg_time_nn = (end_time_nn - start_time_nn) / Nsim * 1e3
-print(f"Avg. NN estimation time per iter: {avg_time_nn:.6f} ms")
-# Compare MHE vs NN estimation
-plt.figure(figsize=(10, Nx*2))
-for i in range(Nx):
-    plt.subplot(Nx,1,i+1)
-    plt.plot(t, x_true[:,i], label='True')
-    plt.plot(t, xhat[:,i], '--', label='MHE')
-    plt.plot(t, xhat_nn[:,i], ':', label='NN Est.')
-    plt.ylabel(f'$x_{i}$')
-    plt.legend()
-plt.xlabel("Time [s]")
-plt.suptitle("State Estimation: MHE vs NN Approximation")
-plt.tight_layout()
+for trial in range(N_mc):
+    x0=rng.uniform([5,-1,-0.1,-0.1,10],[20,1,0.1,0.1,50])
+    u_mc=np.vstack([np.sin(omega*t),np.cos(omega*t)]).T[:-1]
+    w_mc=cholesky(Q,lower=True)@rng.standard_normal((Nx,Nsim))
+    v_mc=cholesky(R,lower=True)@rng.standard_normal((Ny,Nsim+1))
+    x_true_mc=np.zeros((Nsim+1,Nx))
+    y_meas_mc=np.zeros((Nsim+1,Ny))
+    x_true_mc[0]=x0
+    for k in range(Nsim):
+        x_true_mc[k+1]=A@x_true_mc[k]+B@u_mc[k]+w_mc[:,k]
+        y_meas_mc[k]=C@x_true_mc[k]+v_mc[:,k]
+    y_meas_mc[Nsim]=C@x_true_mc[Nsim]+v_mc[:,Nsim]
+
+    # MHE 
+    xhat_mhe = np.zeros((Nsim+1, Nx))
+    xhat_mhe[0] = np.array([20, 1, 0.1, 0.2, 100])
+    P = np.eye(Nx)
+    mhe.Pinv = inv(P)
+    x0bar = xhat_mhe[0].copy()
+    times_mhe=[]
+    for k in range(Nsim):
+        tmin=max(0,k-25)
+        u_win=u_mc[tmin:k] if k>=1 else np.zeros((0,Nu))
+        y_win=y_meas_mc[tmin:k+1]
+        if k>0:
+            x0bar=A@xhat_mhe[k]+B@u_mc[k-1]+L@(y_meas_mc[k]-C@xhat_mhe[k])
+            P=(A-L@C)@P@(A-L@C).T+Q+L@R@L.T
+            mhe.Pinv=inv(P)
+        t0=time.perf_counter()
+        xhat_mhe[k+1]=mhe.estimate(x0bar,u_win,y_win)
+        times_mhe.append((time.perf_counter()-t0)*1e3)
+    rmse_mhe=compute_rmse(xhat_mhe,x_true_mc)
+    ok_s,viol_s=check_state_bounds(xhat_mhe,state_lb,state_ub)
+    ok_u,viol_u=check_input_bounds(u_mc,control_lb,control_ub)
+    results["MHE"]["rmse"].append(rmse_mhe)
+    results["MHE"]["state_ok"].append(ok_s)
+    results["MHE"]["input_ok"].append(ok_u)
+    results["MHE"]["times"].append(times_mhe)
+
+    # NN 
+    xhat_nn=np.zeros((Nsim+1,Nx)); uhat_nn=np.zeros((Nsim,Nu))
+    xhat_nn[0]=np.array([20,1,0.1,0.2,100])
+    times_nn=[]
+    for k in range(Nsim):
+        inp=np.hstack([xhat_nn[k],u_mc[k],y_meas_mc[k+1]])
+        inp_t=torch.tensor(scaler_X.transform(inp.reshape(1,-1)),dtype=torch.float32)
+        t0=time.perf_counter()
+        with torch.no_grad():
+            pred=model(inp_t).numpy()[0]
+        times_nn.append((time.perf_counter()-t0)*1e3)
+        xhat_nn[k+1]=pred[:Nx]; uhat_nn[k]=pred[Nx:]
+    rmse_nn=compute_rmse(xhat_nn,x_true_mc)
+    ok_s,viol_s=check_state_bounds(xhat_nn,state_lb,state_ub)
+    ok_u,viol_u=check_input_bounds(uhat_nn,control_lb,control_ub)
+    results["NN"]["rmse"].append(rmse_nn)
+    results["NN"]["state_ok"].append(ok_s)
+    results["NN"]["input_ok"].append(ok_u)
+    results["NN"]["times"].append(times_nn)
+
+    if (trial+1)%10==0: print(f"Completed {trial+1}/{N_mc}")
+
+def summarize(name):
+    rmse=np.mean(results[name]["rmse"])
+    so=np.sum(results[name]["state_ok"]); io=np.sum(results[name]["input_ok"])
+    time_arr=np.array(results[name]["times"])
+    print(f"\n--- {name} ---")
+    print(f"Avg RMSE {rmse:.4f}")
+    print(f"State constraints ok {so}/{N_mc}")
+    print(f"Input constraints ok {io}/{N_mc}")
+    print(f"Computation time per step [ms]: "
+          f"min={time_arr.min():.3f}, max={time_arr.max():.3f}, avg={time_arr.mean():.3f}")
+
+summarize("MHE")
+summarize("NN")
+
+# Plots
+# Histogram of RMSE
+plt.figure()
+plt.hist(results["MHE"]["rmse"], bins=15, alpha=0.6, label="MHE")
+plt.hist(results["NN"]["rmse"], bins=15, alpha=0.6, label="NN")
+plt.xlabel("RMSE")
+plt.ylabel("Frequency")
+plt.legend()
+plt.title("RMSE Distribution")
 plt.show()
 
+# Example trajectory plot 
+trial_id=0
+plt.figure(figsize=(10,6))
+x_true=np.zeros((Nsim+1,Nx))
+xhat_nn=np.zeros((Nsim+1,Nx))
+rng=np.random.default_rng(0)
+x0=rng.uniform([5,-1,-0.1,-0.1,10],[20,1,0.1,0.1,50])
+u_mc=np.vstack([np.sin(omega*t),np.cos(omega*t)]).T[:-1]
+w_mc=cholesky(Q,lower=True)@rng.standard_normal((Nx,Nsim))
+v_mc=cholesky(R,lower=True)@rng.standard_normal((Ny,Nsim+1))
+x_true[0]=x0
+y_meas=np.zeros((Nsim+1,Ny))
+for k in range(Nsim):
+    x_true[k+1]=A@x_true[k]+B@u_mc[k]+w_mc[:,k]
+    y_meas[k]=C@x_true[k]+v_mc[:,k]
+y_meas[Nsim]=C@x_true[Nsim]+v_mc[:,Nsim]
+xhat_nn[0]=np.array([20,1,0.1,0.2,100])
+for k in range(Nsim):
+    inp=np.hstack([xhat_nn[k],u_mc[k],y_meas[k+1]])
+    inp_t=torch.tensor(scaler_X.transform(inp.reshape(1,-1)),dtype=torch.float32)
+    with torch.no_grad():
+        pred=model(inp_t).numpy()[0]
+    xhat_nn[k+1]=pred[:Nx]
 
+for i in range(Nx):
+    plt.plot(t, x_true[:,i], label=f"x{i}_true")
+    plt.plot(t, xhat_nn[:,i], '--', label=f"x{i}_NN")
+    plt.fill_between(t, state_lb[i], state_ub[i], color="gray", alpha=0.1)
+plt.xlabel("Time [s]")
+plt.ylabel("State values")
+plt.title("True vs NN estimates (trial 0)")
+plt.legend()
+plt.show()
+
+# Plot computation time distribution
+plt.figure()
+mhe_times=np.array(results["MHE"]["times"]).flatten()
+nn_times=np.array(results["NN"]["times"]).flatten()
+plt.hist(mhe_times, bins=20, alpha=0.6, label="MHE")
+plt.hist(nn_times, bins=20, alpha=0.6, label="NN")
+plt.xlabel("Per-step time [ms]")
+plt.ylabel("Frequency")
+plt.title("Computation time distribution")
+plt.legend()
+plt.show()

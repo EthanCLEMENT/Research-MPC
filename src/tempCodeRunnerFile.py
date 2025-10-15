@@ -1,0 +1,2 @@
+
+        pred=model(xb)
